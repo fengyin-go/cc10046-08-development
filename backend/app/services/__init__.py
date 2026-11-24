@@ -23,6 +23,7 @@ from app.services.incremental_sync import IncrementalSyncService
 from app.services.error_logger import ErrorLoggerService
 from app.services.session_manager import SessionManagerService
 from app.services.data_cleanup import DataCleanupService
+from app.services.dedup_registry import dedup_registry
 
 SERVICES: dict[str, BaseModuleService] = {
     "crawler_config": CrawlerConfigService(),
@@ -50,4 +51,8 @@ SERVICES: dict[str, BaseModuleService] = {
 
 
 def service_for(module: str) -> BaseModuleService | None:
-    return SERVICES.get(module)
+    """按模块 key 取服务；去重引擎额外挂上跨批来源仓库供页面读取。"""
+    service = SERVICES.get(module)
+    if service is not None and module == "dedup_engine":
+        service.registry = dedup_registry
+    return service

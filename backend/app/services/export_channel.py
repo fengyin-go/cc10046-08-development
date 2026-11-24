@@ -22,6 +22,13 @@ class ExportChannelService(BaseModuleService):
         rows = store.rows(self.MODULE)
         now = time.strftime("%Y-%m-%d")
         file_size = (len(batch_id) * 1024) + 512
+        # 同一批次可能多次交付/导出，按「批次+格式」去重，避免重放时多出一条导出任务。
+        for row in rows:
+            if row.get("来源批次") == batch_id and row.get("导出格式") == export_format:
+                row["导出状态"] = "已完成"
+                row["完成时间"] = now
+                row["fields"] = ",".join(fields or [])
+                return row
         entry = {
             "id": max((int(r.get("id", 0)) for r in rows), default=0) + 1,
             "任务标识": f"EXPORT-{batch_id}",

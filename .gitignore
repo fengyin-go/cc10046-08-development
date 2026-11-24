@@ -112,3 +112,6 @@ desktop.ini
 !**/.env.example
 !.env.example
 # END S11 LOCAL SNAPSHOT EXCLUSIONS
+
+# ===== 运行期本地状态 =====
+backend/.data/

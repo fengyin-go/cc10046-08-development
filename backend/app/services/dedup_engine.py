@@ -15,9 +15,9 @@ class DedupEngineService(BaseModuleService):
     NEGATIVE_ACTIONS = ["停用策略"]
 
     def domain_dedup(self, items: list[dict], key_fields: list[str]) -> dict:
-        """对数据行执行去重。"""
+        """对单次输入做无状态去重（保留首次出现的行）。"""
         from app.compute import hash_dedup
-        deduped, removed = hash_dedup(items, key_fields)        # 返回校验处理结果，含关联校验和记录批次信息
+        deduped, removed = hash_dedup(items, key_fields)
 
         return {
             "original_count": len(items),
@@ -25,3 +25,12 @@ class DedupEngineService(BaseModuleService):
             "removed_count": removed,
             "deduped_items": deduped,
         }
+
+    def domain_dedup_across_batches(self) -> dict:
+        """跨批去重：按业务键汇总所有批次，保留最早入库且来源仍有效的报价。
+
+        与 ``domain_dedup`` 的区别是这里保留来源：每个选中行都能回查到它出自
+        哪一次采集，同一商品的其它有效报价作为备选来源一并保留。
+        """
+        from app.services.dedup_registry import dedup_registry
+        return dedup_registry.dataset()

@@ -23,6 +23,7 @@ from app.services.session_manager import SessionManagerService
 from app.services.export_channel import ExportChannelService
 from app.services.crawl_audit import CrawlAuditService
 from app.services.data_cleanup import DataCleanupService
+from app.services.dedup_registry import dedup_registry
 
 router = APIRouter(prefix="/api/chains", tags=["业务链路"])
 
@@ -74,7 +75,11 @@ def run_crawl_pipeline(payload: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("/data-process")
 def run_data_process(payload: dict[str, Any]) -> dict[str, Any]:
-    """数据处理：HTML解析 → 字段映射 → HTML清洗 → 去重。"""
+    """数据处理：HTML解析 → 字段映射 → HTML清洗 → 去重（含跨批有来源去重）。
+
+    请求里带 ``batch_id`` 和 ``rows`` 时，原始行会带来源登记到跨批去重数据集；
+    否则仍然只做单次输入的无状态去重，保持原有调用方式可用。
+    """
     html = payload.get("html", "<html><body><p>测试内容</p></body></html>")
     source_data = payload.get("source_data", {"name": "test", "count": "42"})
     mapping_rules = payload.get("mapping_rules", [
@@ -89,15 +94,23 @@ def run_data_process(payload: dict[str, Any]) -> dict[str, Any]:
     items = [map_result, {"title": "extra", "other": "value"}]
     dedup_result = _dedup.domain_dedup(items, key_fields)
 
-    return {
-        "chain": "data-process",
-        "steps": {
-            "parse_html": parse_result,
-            "map_fields": map_result,
-            "clean_html": {"original_length": clean_result["original_length"], "cleaned_length": clean_result["cleaned_length"]},
-            "dedup": {"original_count": dedup_result["original_count"], "deduped_count": dedup_result["deduped_count"], "removed_count": dedup_result["removed_count"]},
-        },
+    steps: dict[str, Any] = {
+        "parse_html": parse_result,
+        "map_fields": map_result,
+        "clean_html": {"original_length": clean_result["original_length"], "cleaned_length": clean_result["cleaned_length"]},
+        "dedup": {"original_count": dedup_result["original_count"], "deduped_count": dedup_result["deduped_count"], "removed_count": dedup_result["removed_count"]},
     }
+
+    if payload.get("batch_id") and payload.get("rows") is not None:
+        ingest = dedup_registry.ingest_batch(
+            str(payload["batch_id"]),
+            payload["rows"],
+            source_config=str(payload.get("source_config", "")),
+        )
+        steps["ingest_batch"] = ingest
+        steps["dedup_dataset"] = dedup_registry.dataset()
+
+    return {"chain": "data-process", "steps": steps}
 
 
 @router.post("/reliability")
@@ -150,12 +163,58 @@ def run_auth(payload: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("/delivery")
 def run_delivery(payload: dict[str, Any]) -> dict[str, Any]:
-    """交付链路：结果存储 → 导出 → 审计 → 数据清理。"""
+    """交付链路：结果存储 → 导出 → 审计 → 数据清理。
+
+    带 ``rows`` 或 ``batch_id`` 的交付会从有来源的去重数据集取数：
+    原始行先按批次登记来源，再由去重引擎决定每个商品当前可交付的报价，
+    交付完成后把冻结的回执一并返回，便于事后核对当初发出的数据和来源。
+    """
     batch_id = payload.get("batch_id", "BATCH-DELIVERY-1")
     config_name = payload.get("config_name", "delivery")
     export_format = payload.get("export_format", "csv")
     fields = payload.get("fields", ["id", "title", "count"])
     cleanup_module = payload.get("cleanup_module", "result_store")
+    rows = payload.get("rows")
+    sourced = rows is not None or bool(payload.get("use_dedup_dataset"))
+
+    if sourced:
+        if rows is not None and not payload.get("skip_ingest"):
+            ingest = dedup_registry.ingest_batch(
+                str(batch_id), rows, source_config=config_name)
+        else:
+            ingest = None
+        delivery_result = dedup_registry.deliver_round()
+        if payload.get("replay"):
+            replay = dedup_registry.replay_batch(str(batch_id))
+        else:
+            replay = None
+        if rows is not None:
+            raw_rows = len(rows)
+        elif ingest is not None:
+            raw_rows = ingest["source_count"]
+        else:
+            raw_rows = 0
+        store_result = _store.domain_store_result(
+            batch_id, config_name,
+            raw_rows, delivery_result["delivered_count"])
+        export_result = _export.domain_export(batch_id, export_format, fields)
+        audit_result = _audit.domain_audit("export", batch_id, "system")
+        cleanup_result = _cleanup.domain_cleanup(f"CLEANUP-{batch_id}", cleanup_module, 30)
+        return {
+            "chain": "delivery",
+            "source": "dedup_dataset",
+            "steps": {
+                "ingest_batch": ingest,
+                "deliver_round": delivery_result,
+                "store_result": store_result,
+                "export": export_result,
+                "audit": audit_result,
+                "cleanup": cleanup_result,
+                "replay": replay,
+            },
+            "receipts": [item["receipt"] for item in delivery_result["delivered"]],
+            "board": delivery_result["board"],
+        }
 
     store_result = _store.domain_store_result(batch_id, config_name, 200, 180)
     export_result = _export.domain_export(batch_id, export_format, fields)

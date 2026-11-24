@@ -69,6 +69,31 @@ npm run dev
 | HTML清洗 | `html_cleaner` | 清洗模板 | 模板标识、适用站点、标签过滤 |
 | 增量同步 | `incremental_sync` | 同步水位 | 水位标识、来源配置、增量字段 |
 
+## 跨批去重与有来源交付
+
+去重引擎原来只对单次输入做无状态去重，看不出同一商品的两个报价分别出自哪次采集。
+现在增加了一条跨批链路（`backend/app/services/dedup_registry.py` +
+`backend/app/routers/dedup.py`），由它持久保存有来源的去重数据集和每次交付的原始行：
+
+- **来源登记**：`POST /api/dedup/batches` 把原始行按批次登记，每行带
+  `provenance_id`、`batch_id`、`row_key`；同一批次重发按内容幂等，不会多记一份来源。
+- **跨批去重数据集**：`GET /api/dedup/dataset` 按业务键选一条最早入库且来源仍有效的报价，
+  其它有效报价作为备选来源保留，两条来源都能回查。
+- **领取页**：`GET /api/dedup/board` 给出每个商品是可领取、已交付、核对中还是无可领取；
+  同一商品同时只允许一条有效交付（`POST /api/dedup/claim`、`POST /api/dedup/deliver`）。
+- **撤回来源**：`POST /api/dedup/withdrawals` 可分批推进，`POST /api/dedup/withdrawals/{id}/resume`
+  续跑；撤回未完成时该商品显示核对中，既不会继续交付旧报价，也不会让下一轮提前发出新报价。
+  重放批次（`POST /api/dedup/batches/{id}/replay`）不会恢复已撤回的来源。
+- **历史回执**：每次交付生成冻结快照（`GET /api/dedup/receipts`），保存当时发出的行和来源，
+  后续撤回、重放都不改动它。
+- **数据处理流水线**：`POST /api/chains/data-process` 带 `batch_id` + `rows` 时走来源登记；
+  `POST /api/chains/delivery` 带 `rows` 或 `use_dedup_dataset` 时按去重数据集交付并返回回执。
+- **持久化**：状态默认落盘到 `backend/.data/dedup_state.json`（可用 `DEDUP_STATE_PATH` 覆盖，
+  `APP_ENV=test` 时不落盘），重启后回执、来源和撤回进度都还在。
+
+去重引擎页面（`/dedup_engine`）下方新增「跨批去重与来源核对」区块，展示领取页状态、
+进行中的撤回任务和历史回执。
+
 ## 约定
 
 - 全部模块共享`frontend/src/views/WorkbenchView.vue|tsx`和一套资源路由。

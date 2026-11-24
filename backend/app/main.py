@@ -10,9 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.routers import ROUTERS
+from app.services.dedup_registry import dedup_registry
 from app.store import store
 
 app = FastAPI(title="网络数据采集与RPA自动化平台", version="1.0.0")
+
+# 启动时恢复上次落盘的来源、交付与回执，重进已交付的批次仍能核对当初发出的记录。
+dedup_registry.load()
 
 app.add_middleware(
     CORSMiddleware,
